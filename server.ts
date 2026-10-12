@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 
+import { createAdapter } from "@socket.io/redis-adapter";
 import { decode } from "@auth/core/jwt";
 import next from "next";
 import { Server, type DefaultEventsMap } from "socket.io";
@@ -7,8 +8,16 @@ import { Server, type DefaultEventsMap } from "socket.io";
 import { db } from "./src/lib/db";
 import type { ClientToServerEvents, ServerToClientEvents } from "./src/lib/events";
 import { roomFor } from "./src/lib/events";
+import {
+  addPresence,
+  onlineUserIds,
+  releaseLocalPresence,
+  removePresence,
+  trackLocal,
+} from "./src/lib/presence";
 import { CLIENT_IP_HEADER } from "./src/lib/rate-limit";
 import { setIO, type IOServer, type SocketData } from "./src/lib/realtime";
+import { getRedis, getRedisSubscriber } from "./src/lib/redis";
 
 const dev = process.env.NODE_ENV !== "production";
 const hostname = process.env.HOSTNAME ?? "localhost";
@@ -55,12 +64,6 @@ async function userIdFromCookies(cookieHeader: string | undefined): Promise<stri
   }
   return null;
 }
-
-/**
- * userId -> live socket ids. A user with three tabs open counts as one online
- * person, and only the first connect / last disconnect moves presence.
- */
-const presence = new Map<string, Set<string>>();
 
 /**
  * Client-driven socket events allowed per socket: a burst of this many, then a
@@ -139,11 +142,38 @@ async function main() {
     cors: dev ? { origin: DEV_SOCKET_ORIGINS, credentials: true } : undefined,
   });
 
+  /**
+   * With Redis, room broadcasts cross instance boundaries.
+   *
+   * Without it a second app instance silently breaks delivery: a message
+   * posted on instance A reaches only the sockets connected to A, and everyone
+   * on B sees nothing until they refetch. This is the single thing that makes
+   * running more than one process correct rather than merely possible.
+   */
+  const pubClient = getRedis();
+  const subClient = getRedisSubscriber();
+
+  if (pubClient && subClient) {
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log("  realtime: Redis adapter attached (multi-instance ready)");
+  } else {
+    console.log("  realtime: in-memory adapter (single instance only)");
+  }
+
   // Reject unauthenticated handshakes here rather than per event, so no socket
   // in a room is ever anonymous.
   io.use(async (socket, nextFn) => {
     const userId = await userIdFromCookies(socket.request.headers.cookie);
     if (!userId) return nextFn(new Error("unauthorized"));
+
+    // A deactivated account must not hold a live socket, even if its cookie is
+    // still cryptographically valid.
+    const account = await db.user.findUnique({
+      where: { id: userId },
+      select: { deactivatedAt: true },
+    });
+    if (!account || account.deactivatedAt) return nextFn(new Error("unauthorized"));
+
     socket.data.userId = userId;
     nextFn();
   });
@@ -169,28 +199,35 @@ async function main() {
 
     const workspaceIds = workspaces.map((w) => w.workspaceId);
 
-    // Presence is only meaningful between people who share a workspace, so the
-    // audience for both the sync and the broadcast is those workspace rooms.
-    const sockets = presence.get(userId) ?? new Set<string>();
-    const wasOffline = sockets.size === 0;
-    sockets.add(socket.id);
-    presence.set(userId, sockets);
+    /**
+     * Presence is reference-counted in a shared store (Redis when configured),
+     * so three tabs count as one online person and a second app instance sees
+     * the same answer. `changed` is true only on the first connection, which
+     * is what keeps a reconnect from broadcasting a spurious online event.
+     *
+     * The broadcast audience is the workspace rooms the person belongs to:
+     * online-ness is only meaningful between people who share one.
+     */
+    const { changed: cameOnline } = await addPresence(userId);
+    trackLocal(userId, 1);
 
-    if (wasOffline && workspaceIds.length > 0) {
+    if (cameOnline && workspaceIds.length > 0) {
       io.to(workspaceIds.map(roomFor.workspace)).emit("presence:update", { userId, online: true });
     }
 
-    if (workspaceIds.length > 0) {
-      const peers = await db.workspaceMember.findMany({
-        where: { workspaceId: { in: workspaceIds } },
-        select: { userId: true },
-        distinct: ["userId"],
-      });
-      const online = peers.map((p) => p.userId).filter((id) => presence.has(id));
-      socket.emit("presence:sync", online);
-    } else {
-      socket.emit("presence:sync", [userId]);
-    }
+    /**
+     * The whole online set, not an intersection with this user's co-workers.
+     *
+     * The previous version read every WorkspaceMember row for every workspace
+     * the user belonged to, just to filter the online list down. In a
+     * thousand-person workspace that is a thousand rows read on each connect,
+     * so a deploy or a network blip -- when everyone reconnects at once --
+     * turned into a million-row read storm precisely when the database was
+     * already under pressure. The set is bounded by concurrent connections,
+     * the client only looks up ids it already knows, and who is online is not
+     * sensitive information between members of the same instance.
+     */
+    socket.emit("presence:sync", await onlineUserIds());
 
     /**
      * Per-socket budget for client-driven events.
@@ -251,17 +288,18 @@ async function main() {
     socket.on("typing:start", (channelId) => relayTyping("typing", channelId));
     socket.on("typing:stop", (channelId) => relayTyping("typing:stop", channelId));
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", async () => {
       clearInterval(refill);
 
-      const live = presence.get(userId);
-      if (!live) return;
-      live.delete(socket.id);
-      if (live.size > 0) return;
+      trackLocal(userId, -1);
+      const { changed: wentOffline } = await removePresence(userId);
 
-      presence.delete(userId);
-      if (workspaceIds.length > 0) {
-        io.to(workspaceIds.map(roomFor.workspace)).emit("presence:update", { userId, online: false });
+      // Only the last of a person's connections closing means they are away.
+      if (wentOffline && workspaceIds.length > 0) {
+        io.to(workspaceIds.map(roomFor.workspace)).emit("presence:update", {
+          userId,
+          online: false,
+        });
       }
     });
   });
@@ -274,16 +312,33 @@ async function main() {
     console.log(`  Thrum ready on http://${hostname}:${port}  (realtime: /socket.io)`);
   });
 
-  const shutdown = async () => {
-    console.log("\n  shutting down...");
-    io.close();
+  /**
+   * Graceful shutdown, which matters more than it looks under an orchestrator.
+   *
+   * Presence counts are shared, so an instance that dies without decrementing
+   * its own contributions leaves those people showing as online until the TTL
+   * expires. During a rolling deploy that is every connected user, on every
+   * release.
+   */
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    console.log(`\n  ${signal} received, shutting down...`);
+
+    // Stop accepting work first, so nothing new arrives mid-teardown.
     httpServer.close();
-    await db.$disconnect();
+    io.close();
+
+    await releaseLocalPresence();
+    await db.$disconnect().catch(() => {});
+
     process.exit(0);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 main().catch((err) => {

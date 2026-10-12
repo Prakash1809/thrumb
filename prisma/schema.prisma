@@ -15,10 +15,27 @@ datasource db {
 model User {
   id            String    @id @default(cuid())
   name          String?
+  /// Stable handle used by @mentions. Generated from the display name on
+  /// creation and unique instance-wide, because a mention has to resolve to
+  /// exactly one person -- display names do not.
+  username      String    @unique
   email         String    @unique
   emailVerified DateTime?
   image         String?
   passwordHash  String?
+  /// Set when an admin deactivates the account. A deactivated user keeps their
+  /// messages (deleting them would tear holes in every thread) but cannot sign
+  /// in, and is dropped from every workspace.
+  deactivatedAt DateTime?
+  /// Sessions issued before this instant are refused.
+  ///
+  /// Sessions are stateless JWTs, so there is no server-side list to delete
+  /// from. This is the revocation mechanism: a password reset or deactivation
+  /// stamps it, and lib/session-revocation.ts compares each token's issue time
+  /// against it. Without this, resetting a compromised account's password
+  /// would lock the attacker out of future sign-ins but leave the session they
+  /// already hold working until it expired.
+  sessionsRevokedAt DateTime?
   createdAt     DateTime  @default(now())
 
   accounts           Account[]
@@ -27,8 +44,80 @@ model User {
   channelMemberships ChannelMember[]
   messages           Message[]
   reactions          Reaction[]
-  createdChannels    Channel[]         @relation("ChannelCreator")
-  createdInvites     WorkspaceInvite[] @relation("InviteCreator")
+  createdChannels    Channel[]            @relation("ChannelCreator")
+  createdInvites     WorkspaceInvite[]    @relation("InviteCreator")
+  mentions           Mention[]
+  resetTokens        PasswordResetToken[]
+  notificationPrefs  NotificationPref[]
+
+  @@index([deactivatedAt])
+}
+
+/// Single-use, short-lived password reset grant.
+///
+/// Only the SHA-256 digest of the token is stored, for the same reason as
+/// invite codes: a database disclosure must not hand the reader working reset
+/// links for every account that has one outstanding.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// One row per person named in a message.
+///
+/// Denormalised out of the message body so "what mentioned me" is an indexed
+/// lookup rather than a full-text scan of every message in the workspace, and
+/// so the badge count survives the message being edited.
+model Mention {
+  id          String    @id @default(cuid())
+  messageId   String
+  userId      String
+  channelId   String
+  workspaceId String
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([userId, readAt])
+  @@index([userId, workspaceId, createdAt(sort: Desc)])
+  @@index([channelId])
+}
+
+enum NotificationLevel {
+  /// Notify for every message in the channel.
+  ALL
+  /// Notify only when named, or on @channel / @here.
+  MENTIONS
+  /// Never notify.
+  NONE
+}
+
+/// Per-user notification choice. A row with a null channelId is the user's
+/// workspace-wide default; a row with one overrides it for that channel.
+model NotificationPref {
+  id          String            @id @default(cuid())
+  userId      String
+  workspaceId String
+  channelId   String?
+  level       NotificationLevel @default(MENTIONS)
+  updatedAt   DateTime          @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, workspaceId, channelId])
+  @@index([userId, workspaceId])
 }
 
 model Account {
@@ -216,11 +305,18 @@ model Message {
   replies     Message[]    @relation("Thread")
   attachments Attachment[]
   reactions   Reaction[]
+  mentions    Mention[]
 
   // Keyset pagination for the channel transcript reads straight off this.
   @@index([channelId, parentId, createdAt(sort: Desc)])
   @@index([parentId, createdAt])
   @@index([workspaceId, createdAt(sort: Desc)])
+  // The first index above also serves unread counting: for each of the
+  // viewer's channels it is a range scan of createdAt > that channel's
+  // lastReadAt. A partial index (WHERE "parentId" IS NULL AND "deletedAt" IS
+  // NULL) would be tighter, but Prisma cannot express the predicate and adding
+  // one out of band would read as schema drift -- which blocks `migrate dev`
+  // entirely. See lib/unread.ts for the query shape that uses this.
   // Stemmed phrase search ("deployed" finds "Deploy").
   @@index([searchVector], type: Gin)
   // Substring and prefix search, for terms a stemmer will not match

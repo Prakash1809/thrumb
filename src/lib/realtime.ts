@@ -69,3 +69,36 @@ export async function removeUsersFromChannelRoom(channelId: string, userIds: str
   const sockets = await io.in(userIds.map(roomFor.user)).fetchSockets();
   for (const socket of sockets) socket.leave(roomFor.channel(channelId));
 }
+
+/**
+ * Revokes a removed member's live subscriptions across a whole workspace.
+ *
+ * Membership rows are gone by the time this runs, but their sockets are still
+ * sitting in the rooms they joined at connect time -- so without this they
+ * would keep receiving messages from every channel until they happened to
+ * reconnect. Access revocation has to take effect now, not eventually.
+ */
+export async function removeUserFromWorkspaceRooms(
+  workspaceId: string,
+  userId: string,
+  /**
+   * Channels belonging to *this* workspace. Required, and passed in by the
+   * caller rather than derived from the socket's room set: a socket's rooms
+   * include channels from every workspace the person is in, so leaving all of
+   * them would revoke access they still legitimately have elsewhere on the
+   * instance.
+   */
+  channelIds: string[],
+) {
+  const io = getIO();
+  if (!io) return;
+
+  const sockets = await io.in(roomFor.user(userId)).fetchSockets();
+  if (sockets.length === 0) return;
+
+  const toLeave = [roomFor.workspace(workspaceId), ...channelIds.map(roomFor.channel)];
+
+  for (const socket of sockets) {
+    for (const room of toLeave) socket.leave(room);
+  }
+}

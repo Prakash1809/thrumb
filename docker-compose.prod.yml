@@ -1,0 +1,97 @@
+# Self-hosted deployment: app, Postgres and Redis.
+#
+#   cp .env.docker.example .env.docker
+#   # edit it -- POSTGRES_PASSWORD and AUTH_SECRET must be changed
+#   docker compose -f docker-compose.prod.yml --env-file .env.docker up -d
+#
+# Migrations are applied by the app container on start (docker/entrypoint.sh),
+# so there is no separate migration step.
+#
+# This file does NOT terminate TLS. Put a reverse proxy in front (Caddy, nginx,
+# Traefik), point it at thrum:3000, and set AUTH_URL to the public origin plus
+# TRUST_PROXY=1 and ENABLE_HSTS=1. See SECURITY.md.
+name: thrum
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: thrum:latest
+    container_name: thrum-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-thrum}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-thrum}?schema=public
+      REDIS_URL: redis://redis:6379
+      AUTH_SECRET: ${AUTH_SECRET:?set AUTH_SECRET -- generate with: openssl rand -base64 32}
+      AUTH_URL: ${AUTH_URL:-http://localhost:3000}
+      # OAuth is optional; each provider's button appears once both vars are set.
+      AUTH_GITHUB_ID: ${AUTH_GITHUB_ID:-}
+      AUTH_GITHUB_SECRET: ${AUTH_GITHUB_SECRET:-}
+      AUTH_GOOGLE_ID: ${AUTH_GOOGLE_ID:-}
+      AUTH_GOOGLE_SECRET: ${AUTH_GOOGLE_SECRET:-}
+      # Mail is optional: without SMTP_HOST, password-reset links are written to
+      # the container log instead of being sent.
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      MAIL_FROM: ${MAIL_FROM:-Thrum <no-reply@localhost>}
+      # Set to 1 only when the proxy in front overwrites X-Forwarded-For.
+      TRUST_PROXY: ${TRUST_PROXY:-0}
+      # Set to 1 once TLS actually terminates in front of this.
+      ENABLE_HSTS: ${ENABLE_HSTS:-0}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-1}
+      MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-26214400}
+      UPLOAD_DIR: /app/var/uploads
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-0}
+    ports:
+      # Bound to loopback: the reverse proxy reaches it over the compose
+      # network, and nothing else should reach it directly.
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-3000}:3000"
+    volumes:
+      # Attachments. Back this up alongside the database -- restoring one
+      # without the other leaves broken links.
+      - thrum-uploads:/app/var
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: thrum-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-thrum}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-thrum}
+    volumes:
+      - thrum-pgdata:/var/lib/postgresql/data
+    # Deliberately no `ports`. The app reaches Postgres over the compose
+    # network; exposing it on the host is how a database ends up on the
+    # internet with a password someone copied from an example file.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-thrum} -d ${POSTGRES_DB:-thrum}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: thrum-redis
+    restart: unless-stopped
+    # Rate-limit counters and presence are both reconstructible, so there is no
+    # reason to pay for persistence or to risk a stale snapshot on restart.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  thrum-pgdata:
+  thrum-uploads:

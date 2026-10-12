@@ -1,6 +1,6 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   createContext,
   useCallback,
@@ -12,34 +12,43 @@ import {
 } from "react";
 
 import { api } from "@/lib/fetcher";
-import type { ChannelDTO, UserSummary } from "@/lib/events";
+import type { ChannelDTO, NotificationLevel, UserSummary } from "@/lib/events";
 import { TYPING_TTL_MS } from "@/lib/events";
 import { useSocket, useSocketEvent } from "@/components/socket-provider";
 
 export type WorkspaceSummary = { id: string; name: string; slug: string };
-export type WorkspaceMemberSummary = UserSummary & { role: "OWNER" | "ADMIN" | "MEMBER" };
+export type WorkspaceRole = "OWNER" | "ADMIN" | "MEMBER";
+
+export type WorkspaceMemberSummary = UserSummary & {
+  role: WorkspaceRole;
+  email?: string | null;
+  deactivated?: boolean;
+};
 
 type TypingEntry = { userId: string; name: string | null; expiresAt: number };
-
-export type WorkspaceRole = "OWNER" | "ADMIN" | "MEMBER";
 
 type WorkspaceContextValue = {
   workspace: WorkspaceSummary;
   viewer: UserSummary;
-  /** The viewer's role here. Gates the invite action; the API re-checks it. */
   viewerRole: WorkspaceRole;
   canInvite: boolean;
+  canAdminister: boolean;
   joined: ChannelDTO[];
   available: ChannelDTO[];
-  members: WorkspaceMemberSummary[];
+  hasMoreAvailable: boolean;
   presence: ReadonlySet<string>;
   activeChannelId: string | null;
   connected: boolean;
+  totalUnreadMentions: number;
   typingIn: (channelId: string) => TypingEntry[];
   markRead: (channelId: string) => void;
+  markMentionsRead: (channelId: string) => void;
   noteIncoming: (channelId: string, authorId: string, at: string) => void;
   refreshChannels: () => Promise<void>;
   openDm: (userIds: string[]) => Promise<ChannelDTO>;
+  /** Server-side member search. Not a filter over a preloaded list. */
+  searchMembers: (query: string) => Promise<WorkspaceMemberSummary[]>;
+  setNotificationLevel: (channelId: string | null, level: NotificationLevel) => Promise<void>;
 };
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -59,10 +68,10 @@ function sortChannels(list: ChannelDTO[]): ChannelDTO[] {
 export function WorkspaceProvider({
   workspace,
   viewer,
-  viewerRole,
+  viewerRole: initialRole,
   initialJoined,
   initialAvailable,
-  initialMembers,
+  initialHasMoreAvailable,
   children,
 }: {
   workspace: WorkspaceSummary;
@@ -70,16 +79,18 @@ export function WorkspaceProvider({
   viewerRole: WorkspaceRole;
   initialJoined: ChannelDTO[];
   initialAvailable: ChannelDTO[];
-  initialMembers: WorkspaceMemberSummary[];
+  initialHasMoreAvailable: boolean;
   children: React.ReactNode;
 }) {
   const params = useParams<{ channelId?: string }>();
+  const router = useRouter();
   const activeChannelId = params?.channelId ?? null;
   const { socket, connected } = useSocket();
 
   const [joined, setJoined] = useState(() => sortChannels(initialJoined));
   const [available, setAvailable] = useState(initialAvailable);
-  const [members, setMembers] = useState(initialMembers);
+  const [hasMoreAvailable, setHasMoreAvailable] = useState(initialHasMoreAvailable);
+  const [viewerRole, setViewerRole] = useState(initialRole);
   const [presence, setPresence] = useState<ReadonlySet<string>>(() => new Set([viewer.id]));
   const [typing, setTyping] = useState<Record<string, TypingEntry[]>>({});
 
@@ -89,23 +100,36 @@ export function WorkspaceProvider({
   activeRef.current = activeChannelId;
 
   const refreshChannels = useCallback(async () => {
-    const data = await api<{ joined: ChannelDTO[]; available: ChannelDTO[] }>(
-      `/api/workspaces/${workspace.id}/channels`,
-    );
+    const data = await api<{
+      joined: ChannelDTO[];
+      available: ChannelDTO[];
+      hasMoreAvailable: boolean;
+    }>(`/api/workspaces/${workspace.id}/channels`);
     setJoined(sortChannels(data.joined));
     setAvailable(data.available);
+    setHasMoreAvailable(data.hasMoreAvailable);
   }, [workspace.id]);
 
-  const markRead = useCallback(
+  const markRead = useCallback((channelId: string) => {
+    setJoined((prev) =>
+      prev.map((c) => (c.id === channelId && c.unreadCount ? { ...c, unreadCount: 0 } : c)),
+    );
+    // Fire and forget: the badge is already gone locally, and a failure just
+    // means it comes back on next load.
+    void api(`/api/channels/${channelId}/read`, { method: "POST" }).catch(() => {});
+  }, []);
+
+  const markMentionsRead = useCallback(
     (channelId: string) => {
       setJoined((prev) =>
-        prev.map((c) => (c.id === channelId && c.unreadCount ? { ...c, unreadCount: 0 } : c)),
+        prev.map((c) => (c.id === channelId && c.unreadMentions ? { ...c, unreadMentions: 0 } : c)),
       );
-      // Fire and forget: the badge is already gone locally, and a failure just
-      // means it comes back on next load.
-      void api(`/api/channels/${channelId}/read`, { method: "POST" }).catch(() => {});
+      void api(`/api/workspaces/${workspace.id}/mentions`, {
+        method: "POST",
+        body: { channelId },
+      }).catch(() => {});
     },
-    [],
+    [workspace.id],
   );
 
   /** Bumps recency, and unread when the channel is not the one on screen. */
@@ -144,6 +168,44 @@ export function WorkspaceProvider({
     [socket, workspace.id],
   );
 
+  /**
+   * Member lookup goes to the server.
+   *
+   * The previous version loaded every member into context on mount and
+   * filtered client-side, which is a thousand-row payload on every page load in
+   * a large workspace -- and the picker still only ever showed eight of them.
+   */
+  const searchMembers = useCallback(
+    async (query: string) => {
+      const params = new URLSearchParams({ limit: "25" });
+      if (query.trim()) params.set("q", query.trim());
+
+      const data = await api<{ members: WorkspaceMemberSummary[] }>(
+        `/api/workspaces/${workspace.id}/members?${params.toString()}`,
+      );
+      return data.members;
+    },
+    [workspace.id],
+  );
+
+  const setNotificationLevel = useCallback(
+    async (channelId: string | null, level: NotificationLevel) => {
+      // Optimistic: the switch should move under the finger, not after a round
+      // trip. A failure is corrected by the next channel refresh.
+      if (channelId) {
+        setJoined((prev) => prev.map((c) => (c.id === channelId ? { ...c, notify: level } : c)));
+      }
+
+      await api(`/api/workspaces/${workspace.id}/notifications`, {
+        method: "PUT",
+        body: { channelId, level },
+      });
+
+      if (!channelId) await refreshChannels();
+    },
+    [refreshChannels, workspace.id],
+  );
+
   useSocketEvent("presence:sync", (ids) => {
     setPresence(new Set([viewer.id, ...ids]));
   });
@@ -161,9 +223,7 @@ export function WorkspaceProvider({
     if (channel.workspaceId !== workspace.id) return;
 
     if (channel.isMember) {
-      setJoined((prev) =>
-        sortChannels([...prev.filter((c) => c.id !== channel.id), channel]),
-      );
+      setJoined((prev) => sortChannels([...prev.filter((c) => c.id !== channel.id), channel]));
       setAvailable((prev) => prev.filter((c) => c.id !== channel.id));
       socket?.emit("channel:subscribe", channel.id);
     } else {
@@ -174,10 +234,32 @@ export function WorkspaceProvider({
   useSocketEvent("channel:removed", ({ channelId }) => {
     setJoined((prev) => prev.filter((c) => c.id !== channelId));
     setAvailable((prev) => prev.filter((c) => c.id !== channelId));
+
+    // If they were looking at it when access was revoked, get them out of it
+    // rather than leaving a pane that will 404 on its next fetch.
+    if (activeRef.current === channelId) router.push(`/w/${workspace.id}`);
   });
 
   useSocketEvent("read:update", ({ channelId }) => {
     setJoined((prev) => prev.map((c) => (c.id === channelId ? { ...c, unreadCount: 0 } : c)));
+  });
+
+  useSocketEvent("mentions:update", ({ channelId, unreadMentions }) => {
+    setJoined((prev) =>
+      prev.map((c) => (c.id === channelId ? { ...c, unreadMentions } : c)),
+    );
+  });
+
+  useSocketEvent("membership:update", ({ workspaceId, role }) => {
+    if (workspaceId !== workspace.id) return;
+
+    // Removed from the workspace entirely: there is nothing left to render.
+    if (role === null) {
+      router.push("/w");
+      return;
+    }
+
+    setViewerRole(role);
   });
 
   useSocketEvent("typing", ({ channelId, userId, name }) => {
@@ -229,15 +311,11 @@ export function WorkspaceProvider({
     wasConnected.current = connected;
   }, [connected, refreshChannels]);
 
-  useEffect(() => {
-    void api<{ members: WorkspaceMemberSummary[] }>(`/api/workspaces/${workspace.id}/members`)
-      .then((data) => setMembers(data.members))
-      .catch(() => {});
-  }, [workspace.id]);
+  const typingIn = useCallback((channelId: string) => typing[channelId] ?? [], [typing]);
 
-  const typingIn = useCallback(
-    (channelId: string) => typing[channelId] ?? [],
-    [typing],
+  const totalUnreadMentions = useMemo(
+    () => joined.reduce((sum, c) => sum + c.unreadMentions, 0),
+    [joined],
   );
 
   const value = useMemo<WorkspaceContextValue>(
@@ -245,20 +323,25 @@ export function WorkspaceProvider({
       workspace,
       viewer,
       viewerRole,
-      // Hiding the control is a convenience, not the control: POST
-      // /api/workspaces/[id]/invites calls requireWorkspaceAdmin regardless.
+      // Hiding a control is a convenience, not the control: every one of these
+      // endpoints re-checks the role server-side.
       canInvite: viewerRole !== "MEMBER",
+      canAdminister: viewerRole !== "MEMBER",
       joined,
       available,
-      members,
+      hasMoreAvailable,
       presence,
       activeChannelId,
       connected,
+      totalUnreadMentions,
       typingIn,
       markRead,
+      markMentionsRead,
       noteIncoming,
       refreshChannels,
       openDm,
+      searchMembers,
+      setNotificationLevel,
     }),
     [
       workspace,
@@ -266,15 +349,19 @@ export function WorkspaceProvider({
       viewerRole,
       joined,
       available,
-      members,
+      hasMoreAvailable,
       presence,
       activeChannelId,
       connected,
+      totalUnreadMentions,
       typingIn,
       markRead,
+      markMentionsRead,
       noteIncoming,
       refreshChannels,
       openDm,
+      searchMembers,
+      setNotificationLevel,
     ],
   );
 

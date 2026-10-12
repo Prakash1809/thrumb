@@ -13,6 +13,8 @@ const LOAD_OLDER_AT_PX = 250;
 export function MessageList({
   messages,
   viewerId,
+  viewerUsername,
+  knownUsernames,
   presence,
   hasOlder,
   loadingMore,
@@ -29,6 +31,8 @@ export function MessageList({
 }: {
   messages: LocalMessage[];
   viewerId: string;
+  viewerUsername?: string;
+  knownUsernames?: ReadonlySet<string>;
   presence: ReadonlySet<string>;
   hasOlder: boolean;
   loadingMore: boolean;
@@ -151,6 +155,8 @@ export function MessageList({
                 message={message}
                 grouped={!newDay && isGrouped(previous, message)}
                 viewerId={viewerId}
+                viewerUsername={viewerUsername}
+                knownUsernames={knownUsernames}
                 online={presence.has(message.user.id)}
                 onToggleReaction={onToggleReaction}
                 onOpenThread={onOpenThread}

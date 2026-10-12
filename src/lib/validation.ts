@@ -110,3 +110,53 @@ export const createInviteSchema = z.object({
   expiresInHours: z.number().int().min(1).max(24 * 90).optional().default(24 * 7),
   role: z.enum(["MEMBER", "ADMIN"]).optional().default("MEMBER"),
 });
+
+export const memberListSchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(50),
+  cursor: z.string().min(1).max(64).optional(),
+  includeDeactivated: z
+    .union([z.literal("1"), z.literal("0"), z.undefined()])
+    .transform((v) => v === "1"),
+});
+
+export const updateMemberSchema = z.object({
+  role: z.enum(["OWNER", "ADMIN", "MEMBER"]),
+});
+
+export const addChannelMembersSchema = z.object({
+  userIds: z.array(z.string().min(1).max(64)).min(1).max(200),
+});
+
+export const browseChannelsSchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional().default(30),
+  cursor: z.string().min(1).max(64).optional(),
+});
+
+export const notificationPrefSchema = z.object({
+  /** Null targets the workspace-wide default rather than one channel. */
+  channelId: z.string().min(1).max(64).nullable().optional().default(null),
+  level: z.enum(["ALL", "MENTIONS", "NONE"]),
+});
+
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().toLowerCase().email().max(254),
+});
+
+export const resetPasswordSchema = z.object({
+  token: z.string().min(16).max(128),
+  password: z
+    .string()
+    .min(MIN_PASSWORD_LENGTH, `Password must be at least ${MIN_PASSWORD_LENGTH} characters`)
+    .max(200)
+    .superRefine((value, ctx) => {
+      const problem = validatePasswordStrength(value);
+      if (problem) ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem });
+    }),
+});
+
+export const mentionFeedSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).optional().default(50),
+  cursor: z.string().min(1).max(64).optional(),
+});

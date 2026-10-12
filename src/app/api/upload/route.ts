@@ -16,7 +16,7 @@ export const POST = route(async (req: Request) => {
   const user = await requireUser();
   // Uploads are the only endpoint that consumes unbounded disk, so this is the
   // limit that matters most for a public instance.
-  enforce("upload", user.id);
+  await enforce("upload", user.id);
 
   const form = await req.formData().catch(() => {
     throw badRequest("Expected a multipart form upload");

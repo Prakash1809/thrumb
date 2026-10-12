@@ -3,6 +3,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { CloseIcon, PaperclipIcon, SendIcon } from "@/components/icons";
+import {
+  MentionAutocomplete,
+  applyMention,
+  mentionQueryAt,
+  useMentionKeys,
+  useRankedCandidates,
+  type MentionCandidate,
+} from "@/components/mention-autocomplete";
 import { useSocket } from "@/components/socket-provider";
 import type { PendingAttachment } from "@/hooks/use-channel-messages";
 import { uploadFiles } from "@/lib/fetcher";
@@ -18,6 +26,7 @@ export function Composer({
   autoFocus = false,
   resetKey,
   restoreOnError = false,
+  mentionPeople = [],
   onSend,
 }: {
   /** Real channel id. Typing events are scoped to this, so it must be joinable. */
@@ -37,6 +46,8 @@ export function Composer({
    * replies have no such row, so without this the text would be lost.
    */
   restoreOnError?: boolean;
+  /** People offered by the @mention picker -- channel members, typically. */
+  mentionPeople?: MentionCandidate[];
   onSend: (input: { body: string; attachments: PendingAttachment[] }) => Promise<unknown>;
 }) {
   const { socket } = useSocket();
@@ -52,12 +63,55 @@ export function Composer({
   const lastTypingAt = useRef(0);
   const draftKey = resetKey ?? channelId;
 
+  // Mention picker state. `mention` is non-null exactly while the caret sits
+  // inside an @handle being typed, which is what opens and closes the list.
+  const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const candidates = useRankedCandidates(mentionPeople, mention?.query ?? "");
+
   // Switching channels or threads should not carry a half-written message across.
   useEffect(() => {
     setValue("");
     setAttachments([]);
     setError(null);
+    setMention(null);
   }, [draftKey]);
+
+  /** Recomputes the mention context from wherever the caret now is. */
+  const syncMention = useCallback((el: HTMLTextAreaElement) => {
+    const found = mentionQueryAt(el.value, el.selectionStart ?? el.value.length);
+    setMention(found);
+    setActiveIndex(0);
+  }, []);
+
+  const pickMention = useCallback(
+    (index: number) => {
+      const candidate = candidates[index];
+      const el = textareaRef.current;
+      if (!candidate || !mention || !el) return;
+
+      const next = applyMention(value, mention, candidate.username);
+      setValue(next.value);
+      setMention(null);
+
+      // Put the caret after the inserted handle on the next frame, once React
+      // has written the new value into the DOM.
+      requestAnimationFrame(() => {
+        el.focus();
+        el.setSelectionRange(next.caret, next.caret);
+      });
+    },
+    [candidates, mention, value],
+  );
+
+  const handleMentionKeys = useMentionKeys({
+    open: mention !== null,
+    count: candidates.length,
+    activeIndex,
+    setActiveIndex,
+    onPick: pickMention,
+    onClose: () => setMention(null),
+  });
 
   const resize = useCallback(() => {
     const el = textareaRef.current;
@@ -129,7 +183,16 @@ export function Composer({
   const canSend = (value.trim().length > 0 || attachments.length > 0) && !uploading && !sending;
 
   return (
-    <div className="px-4 pb-4">
+    <div className="relative px-4 pb-4">
+      {mention && (
+        <MentionAutocomplete
+          candidates={candidates}
+          activeIndex={activeIndex}
+          onPick={(candidate) => pickMention(candidates.indexOf(candidate))}
+          onHover={setActiveIndex}
+        />
+      )}
+
       <div
         className="rounded-lg border border-[var(--color-line)] bg-[var(--color-surface)] focus-within:border-[var(--color-ink-muted)]"
         onDragOver={(e) => e.preventDefault()}
@@ -171,9 +234,18 @@ export function Composer({
           className="block w-full resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-[var(--color-ink-muted)]"
           onChange={(e) => {
             setValue(e.target.value);
+            syncMention(e.target);
             noteTyping();
           }}
+          // Clicking or arrowing elsewhere can move the caret out of (or into)
+          // a handle without a change event, so the picker is resynced here too.
+          onKeyUp={(e) => syncMention(e.currentTarget)}
+          onClick={(e) => syncMention(e.currentTarget)}
           onKeyDown={(e) => {
+            // The picker gets first refusal on arrows, Enter, Tab and Escape --
+            // otherwise Enter would send the message mid-mention.
+            if (handleMentionKeys(e)) return;
+
             // Enter sends; Shift+Enter is a newline. Standard chat behaviour,
             // and the composer grows rather than scrolling a fixed box.
             if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {

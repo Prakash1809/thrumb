@@ -1,12 +1,11 @@
 import { notFound, redirect } from "next/navigation";
 
 import { SocketProvider } from "@/components/socket-provider";
-import { WorkspaceProvider, type WorkspaceMemberSummary } from "@/components/workspace-provider";
+import { WorkspaceProvider } from "@/components/workspace-provider";
 import { WorkspaceShell } from "@/components/workspace-shell";
 import { currentUser } from "@/lib/auth";
 import { listChannelsForUser } from "@/lib/channels";
 import { db } from "@/lib/db";
-import { userSelect } from "@/lib/serialize";
 
 export default async function WorkspaceLayout({
   params,
@@ -27,14 +26,10 @@ export default async function WorkspaceLayout({
   // not exist, so membership and existence share one 404.
   if (!membership) notFound();
 
-  const [{ joined, available }, members] = await Promise.all([
-    listChannelsForUser(user.id, workspaceId),
-    db.workspaceMember.findMany({
-      where: { workspaceId },
-      select: { role: true, user: { select: userSelect } },
-      orderBy: { user: { name: "asc" } },
-    }),
-  ]);
+  // The member list is no longer loaded here. In a thousand-person workspace
+  // that was a thousand rows serialised into every page, to populate a picker
+  // that shows eight at a time -- it is a server-side search now.
+  const { joined, available, hasMoreAvailable } = await listChannelsForUser(user.id, workspaceId);
 
   // The sidebar is server-rendered with real data on first paint, then takes
   // over client-side from socket events -- no loading spinner on entry.
@@ -42,13 +37,16 @@ export default async function WorkspaceLayout({
     <SocketProvider>
       <WorkspaceProvider
         workspace={membership.workspace}
-        viewer={{ id: user.id, name: user.name ?? null, image: user.image ?? null }}
+        viewer={{
+          id: user.id,
+          name: user.name ?? null,
+          username: user.username,
+          image: user.image ?? null,
+        }}
         viewerRole={membership.role}
         initialJoined={joined}
         initialAvailable={available}
-        initialMembers={
-          members.map((m) => ({ ...m.user, role: m.role })) as WorkspaceMemberSummary[]
-        }
+        initialHasMoreAvailable={hasMoreAvailable}
       >
         <WorkspaceShell>{children}</WorkspaceShell>
       </WorkspaceProvider>

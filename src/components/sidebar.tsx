@@ -27,6 +27,8 @@ function ChannelRow({
   const isNamed = channel.type === "PUBLIC" || channel.type === "PRIVATE";
   const label = channelLabel(channel);
   const unread = channel.unreadCount;
+  const mentions = channel.unreadMentions;
+  const muted = channel.notify === "NONE";
   const counterpart = channel.counterparts[0];
 
   return (
@@ -38,7 +40,7 @@ function ChannelRow({
         className={`focus-ring flex items-center gap-2 rounded-md px-2 py-1 text-sm transition ${
           active
             ? "bg-[var(--color-rail-active)] font-semibold text-white"
-            : unread > 0
+            : mentions > 0 || (unread > 0 && !muted)
               ? "font-semibold text-white hover:bg-[var(--color-rail-hover)]"
               : "text-[var(--color-rail-text)] hover:bg-[var(--color-rail-hover)]"
         }`}
@@ -55,10 +57,28 @@ function ChannelRow({
 
         <span className="min-w-0 flex-1 truncate">{label}</span>
 
-        {unread > 0 && !active && (
-          <span className="rounded-full bg-[var(--color-danger)] px-1.5 text-[11px] font-bold tabular-nums text-white">
-            {unread > 99 ? "99+" : unread}
+        {/* A mention badge outranks an unread count: "someone needs you" is a
+            different message from "there is traffic here". */}
+        {mentions > 0 ? (
+          <span
+            title={`${mentions} mention${mentions === 1 ? "" : "s"}`}
+            className="rounded-full bg-[var(--color-danger)] px-1.5 text-[11px] font-bold tabular-nums text-white"
+          >
+            @{mentions > 99 ? "99+" : mentions}
           </span>
+        ) : (
+          unread > 0 &&
+          !active && (
+            <span
+              className={`rounded-full px-1.5 text-[11px] font-bold tabular-nums ${
+                muted
+                  ? "bg-white/15 text-[var(--color-rail-muted)]"
+                  : "bg-[var(--color-danger)] text-white"
+              }`}
+            >
+              {unread > 99 ? "99+" : unread}
+            </span>
+          )
         )}
       </Link>
     </li>
@@ -100,12 +120,14 @@ export function Sidebar({
   onNewChannel,
   onNewDm,
   onInvite,
+  onOpenMembers,
   onNavigate,
 }: {
   onOpenSearch: () => void;
   onNewChannel: () => void;
   onNewDm: () => void;
   onInvite: () => void;
+  onOpenMembers: () => void;
   onNavigate?: () => void;
 }) {
   const router = useRouter();
@@ -118,6 +140,7 @@ export function Sidebar({
     refreshChannels,
     presence,
     canInvite,
+    hasMoreAvailable,
   } = useWorkspace();
   const [menuOpen, setMenuOpen] = useState(false);
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -172,6 +195,16 @@ export function Sidebar({
                 Invite people
               </button>
             )}
+            <button
+              type="button"
+              className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[var(--color-surface-2)]"
+              onClick={() => {
+                setMenuOpen(false);
+                onOpenMembers();
+              }}
+            >
+              People
+            </button>
             <Link
               href="/w"
               className="block px-3 py-1.5 text-sm hover:bg-[var(--color-surface-2)]"
@@ -258,7 +291,7 @@ export function Sidebar({
               <ChevronIcon
                 className={`size-3 transition-transform ${browseOpen ? "rotate-90" : ""}`}
               />
-              Browse {available.length} more
+              Browse {available.length}{hasMoreAvailable ? "+" : ""} more
             </button>
 
             {browseOpen && (

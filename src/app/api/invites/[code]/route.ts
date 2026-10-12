@@ -41,7 +41,7 @@ async function findInvite(code: string) {
 export const GET = route(async (req: Request, { params }: Params) => {
   await requireUser();
   const { code } = await params;
-  enforce("redeemInvite", clientAddress(req));
+  await enforce("redeemInvite", clientAddress(req));
 
   const invite = await findInvite(code);
   if (!invite) throw notFound("That invite link is not valid.");
@@ -64,7 +64,7 @@ export const GET = route(async (req: Request, { params }: Params) => {
 export const POST = route(async (req: Request, { params }: Params) => {
   const user = await requireUser();
   const { code } = await params;
-  enforce("redeemInvite", clientAddress(req));
+  await enforce("redeemInvite", clientAddress(req));
 
   const invite = await findInvite(code);
   if (!invite) throw notFound("That invite link is not valid.");

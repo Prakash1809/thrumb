@@ -2,6 +2,7 @@ import { badRequest, readJson, route } from "@/lib/api";
 import { requireUser } from "@/lib/auth";
 import { requireChannelAccess } from "@/lib/authz";
 import { db } from "@/lib/db";
+import { deliverNotifications, recordMentions, resolveMentions } from "@/lib/notify";
 import { enforce } from "@/lib/rate-limit";
 import { emitToChannel } from "@/lib/realtime";
 import { messageInclude, toMessageDTO } from "@/lib/serialize";
@@ -41,7 +42,7 @@ export const GET = route(async (req: Request, { params }: Params) => {
 
 export const POST = route(async (req: Request, { params }: Params) => {
   const user = await requireUser();
-  enforce("sendMessage", user.id);
+  await enforce("sendMessage", user.id);
 
   const { channelId } = await params;
   const { channel } = await requireChannelAccess(user.id, channelId);
@@ -126,6 +127,41 @@ export const POST = route(async (req: Request, { params }: Params) => {
     const parent = await db.message.findUnique({ where: { id: parentId }, include: messageInclude });
     if (parent) emit("message:update", toMessageDTO(parent));
   }
+
+  /**
+   * Mentions and notifications happen after the response is prepared and are
+   * not awaited into the critical path: the message is already committed and
+   * broadcast, so a slow preference lookup must not delay the sender's 201.
+   * Unread badges are the durable signal; a dropped desktop notification is
+   * recoverable, a delayed send is not.
+   */
+  void (async () => {
+    try {
+      const resolution = await resolveMentions(created.body, channelId);
+
+      await recordMentions({
+        messageId: created.id,
+        channelId,
+        workspaceId: channel.workspaceId,
+        authorId: user.id,
+        mentionedUserIds: resolution.mentionedUserIds,
+      });
+
+      await deliverNotifications({
+        message: { id: created.id, body: created.body },
+        channel: {
+          id: channel.id,
+          workspaceId: channel.workspaceId,
+          type: channel.type,
+          name: channel.name,
+        },
+        author: created.user,
+        mentions: resolution,
+      });
+    } catch (err) {
+      console.error("[notify]", err);
+    }
+  })();
 
   return Response.json({ message: dto }, { status: 201 });
 });

@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { signIn } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -53,18 +54,25 @@ export function LoginForm({ callbackUrl }: { callbackUrl: string }) {
       </div>
 
       <div>
-        <label className={labelClass} htmlFor="password">
-          Password
-        </label>
+        <div className="flex items-baseline justify-between">
+          <label className={labelClass} htmlFor="password">
+            Password
+          </label>
+          <Link
+            href="/forgot"
+            className="mb-1.5 text-xs font-medium text-[var(--color-accent)] hover:underline"
+          >
+            Forgot?
+          </Link>
+        </div>
         <input
           id="password"
           name="password"
           type="password"
           autoComplete="current-password"
           required
-          minLength={8}
           className={inputClass}
-          placeholder="At least 8 characters"
+          placeholder="Your password"
         />
       </div>
 

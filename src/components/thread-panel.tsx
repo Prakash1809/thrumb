@@ -8,7 +8,7 @@ import { MessageRow } from "@/components/message-row";
 import { useSocketEvent } from "@/components/socket-provider";
 import { useWorkspace } from "@/components/workspace-provider";
 import type { LocalMessage, PendingAttachment } from "@/hooks/use-channel-messages";
-import type { MessageDTO } from "@/lib/events";
+import type { MessageDTO, UserSummary } from "@/lib/events";
 import { api } from "@/lib/fetcher";
 import { isGrouped } from "@/lib/time";
 
@@ -20,10 +20,14 @@ import { isGrouped } from "@/lib/time";
 export function ThreadPanel({
   rootId,
   channelId,
+  mentionPeople = [],
+  knownUsernames,
   onClose,
 }: {
   rootId: string;
   channelId: string;
+  mentionPeople?: UserSummary[];
+  knownUsernames?: ReadonlySet<string>;
   onClose: () => void;
 }) {
   const { viewer, workspace, presence } = useWorkspace();
@@ -145,6 +149,8 @@ export function ThreadPanel({
               message={parent}
               grouped={false}
               viewerId={viewer.id}
+              viewerUsername={viewer.username}
+              knownUsernames={knownUsernames}
               online={presence.has(parent.user.id)}
               onToggleReaction={toggleReaction}
               onEdit={editMessage}
@@ -166,6 +172,8 @@ export function ThreadPanel({
                 message={reply}
                 grouped={isGrouped(replies[index - 1], reply)}
                 viewerId={viewer.id}
+                viewerUsername={viewer.username}
+                knownUsernames={knownUsernames}
                 online={presence.has(reply.user.id)}
                 onToggleReaction={toggleReaction}
                 onEdit={editMessage}
@@ -182,6 +190,7 @@ export function ThreadPanel({
           resetKey={`thread:${rootId}`}
           workspaceId={workspace.id}
           restoreOnError
+          mentionPeople={mentionPeople}
           placeholder="Reply in thread"
           onSend={sendReply}
         />

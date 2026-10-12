@@ -6,7 +6,7 @@ import { AttachmentList } from "@/components/attachment-list";
 import { Avatar } from "@/components/avatar";
 import { EmojiPicker } from "@/components/emoji-picker";
 import { EmojiIcon, PencilIcon, ThreadIcon, TrashIcon } from "@/components/icons";
-import { Linkify } from "@/components/linkify";
+import { MessageText } from "@/components/message-text";
 import type { LocalMessage } from "@/hooks/use-channel-messages";
 import { clockTime, fullTime } from "@/lib/time";
 
@@ -14,6 +14,8 @@ export function MessageRow({
   message,
   grouped,
   viewerId,
+  viewerUsername,
+  knownUsernames,
   online,
   onToggleReaction,
   onOpenThread,
@@ -25,6 +27,10 @@ export function MessageRow({
   message: LocalMessage;
   grouped: boolean;
   viewerId: string;
+  /** Highlights the viewer's own @mentions differently from everyone else's. */
+  viewerUsername?: string;
+  /** Handles known to exist, so an unresolvable @typo renders as plain text. */
+  knownUsernames?: ReadonlySet<string>;
   online?: boolean;
   onToggleReaction: (messageId: string, emoji: string) => void;
   onOpenThread?: (message: LocalMessage) => void;
@@ -149,7 +155,7 @@ export function MessageRow({
             <>
               {message.body && (
                 <p className="message-body text-sm">
-                  <Linkify text={message.body} />
+                  <MessageText text={message.body} viewerUsername={viewerUsername} knownUsernames={knownUsernames} />
                   {message.editedAt && (
                     <span className="ml-1.5 align-baseline text-[11px] text-[var(--color-ink-muted)]">
                       (edited)

@@ -1,0 +1,31 @@
+# Keep the build context small and secrets out of the image.
+node_modules
+.next
+.git
+.github
+
+# Secrets. These must never reach an image layer.
+.env
+.env.local
+.env.docker
+.env*.local
+*.pem
+*.key
+
+# User content
+var
+
+# Logs and local artefacts
+*.log
+coverage
+.nyc_output
+playwright-report
+test-results
+tsconfig.tsbuildinfo
+next-env.d.ts
+
+# Editors
+.vscode
+.idea
+.DS_Store
+Thumbs.db

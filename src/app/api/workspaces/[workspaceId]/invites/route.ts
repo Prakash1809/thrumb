@@ -43,7 +43,7 @@ export const POST = route(async (req: Request, { params }: Params) => {
 
   // Only admins and owners can widen access to a workspace.
   await requireWorkspaceAdmin(user.id, workspaceId);
-  enforce("createInvite", user.id);
+  await enforce("createInvite", user.id);
 
   const { maxUses, expiresInHours, role } = createInviteSchema.parse(await readJson(req));
   const { code, codeHash, codeHint } = mintInviteCode();

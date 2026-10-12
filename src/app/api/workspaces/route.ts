@@ -33,7 +33,7 @@ export const GET = route(async () => {
 
 export const POST = route(async (req: Request) => {
   const user = await requireUser();
-  enforce("createResource", user.id);
+  await enforce("createResource", user.id);
 
   const { name } = createWorkspaceSchema.parse(await readJson(req));
 

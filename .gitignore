@@ -9,12 +9,14 @@ dist/
 next-env.d.ts
 tsconfig.tsbuildinfo
 
-# Secrets. .env holds AUTH_SECRET and the database URL -- never commit it.
-# .env.example is the committed, placeholder-only template.
+# Secrets. .env and .env.docker hold AUTH_SECRET and the database password --
+# never commit them. The .example files are the committed, placeholder-only
+# templates.
 .env
 .env.local
 .env*.local
 .env.production
+.env.docker
 *.pem
 *.key
 *.p12

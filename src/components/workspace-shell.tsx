@@ -1,19 +1,61 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 
 import { CloseIcon, SearchIcon } from "@/components/icons";
 import { InviteDialog } from "@/components/invite-dialog";
+import { MembersDialog } from "@/components/members-dialog";
 import { NewChannelDialog } from "@/components/new-channel-dialog";
 import { NewDmDialog } from "@/components/new-dm-dialog";
+import { NotificationBanner } from "@/components/notification-banner";
 import { SearchDialog } from "@/components/search-dialog";
 import { Sidebar } from "@/components/sidebar";
+import { useWorkspace } from "@/components/workspace-provider";
+import { useNotifications, useTitleBadge } from "@/hooks/use-notifications";
 
-type Dialog = "search" | "channel" | "dm" | "invite" | null;
+type Dialog = "search" | "channel" | "dm" | "invite" | "members" | null;
 
 export function WorkspaceShell({ children }: { children: React.ReactNode }) {
+  const router = useRouter();
+  const { workspace, activeChannelId, totalUnreadMentions } = useWorkspace();
+
   const [dialog, setDialog] = useState<Dialog>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [bannerDismissed, setBannerDismissed] = useState(false);
+
+  /**
+   * Notifications are suppressed for whatever is on screen in a focused tab --
+   * notifying someone about a message they are looking at is pure noise.
+   */
+  const [tabVisible, setTabVisible] = useState(true);
+  useEffect(() => {
+    const onVisibility = () => setTabVisible(document.visibilityState === "visible");
+    onVisibility();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, []);
+
+  const activeRef = useRef(activeChannelId);
+  activeRef.current = activeChannelId;
+
+  const { permission, request, shouldOfferPermission, unseen, clearUnseen } = useNotifications({
+    // A notification is worth showing unless the tab is focused *and* already
+    // showing that conversation; the hook receives the decision, not the state.
+    enabled: true,
+    onOpen: (payload) => {
+      router.push(`/w/${payload.workspaceId}/c/${payload.channelId}`);
+    },
+  });
+
+  // The title badge counts unread mentions, which is the durable signal --
+  // desktop notifications can be denied or missed, a tab title cannot.
+  useTitleBadge(totalUnreadMentions);
+
+  // Returning to the tab means they have seen what was waiting.
+  useEffect(() => {
+    if (tabVisible) clearUnseen();
+  }, [tabVisible, clearUnseen, unseen]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -36,6 +78,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
           onNewChannel={() => setDialog("channel")}
           onNewDm={() => setDialog("dm")}
           onInvite={() => setDialog("invite")}
+          onOpenMembers={() => setDialog("members")}
         />
       </div>
 
@@ -65,6 +108,10 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
                 setDrawerOpen(false);
                 setDialog("invite");
               }}
+              onOpenMembers={() => {
+                setDrawerOpen(false);
+                setDialog("members");
+              }}
               onNavigate={() => setDrawerOpen(false)}
             />
           </div>
@@ -80,6 +127,13 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       )}
 
       <main className="flex min-w-0 flex-1 flex-col">
+        {shouldOfferPermission && !bannerDismissed && (
+          <NotificationBanner
+            onEnable={() => void request()}
+            onDismiss={() => setBannerDismissed(true)}
+          />
+        )}
+
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-line)] px-3 py-2 lg:hidden">
           <button
             type="button"
@@ -108,6 +162,7 @@ export function WorkspaceShell({ children }: { children: React.ReactNode }) {
       {dialog === "channel" && <NewChannelDialog onClose={() => setDialog(null)} />}
       {dialog === "dm" && <NewDmDialog onClose={() => setDialog(null)} />}
       {dialog === "invite" && <InviteDialog onClose={() => setDialog(null)} />}
+      {dialog === "members" && <MembersDialog onClose={() => setDialog(null)} />}
     </div>
   );
 }

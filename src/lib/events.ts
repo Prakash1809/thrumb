@@ -6,6 +6,8 @@
 export type UserSummary = {
   id: string;
   name: string | null;
+  /** Handle used by @mentions. Unique instance-wide. */
+  username: string;
   image: string | null;
 };
 
@@ -56,7 +58,33 @@ export type ChannelDTO = {
   /** For DM/GROUP rows: the members other than the viewer, used for the label. */
   counterparts: UserSummary[];
   unreadCount: number;
+  /** Unread messages that named the viewer. Badged separately and louder. */
+  unreadMentions: number;
   isMember: boolean;
+  /** The viewer's notification choice for this channel. */
+  notify: NotificationLevel;
+};
+
+export type NotificationLevel = "ALL" | "MENTIONS" | "NONE";
+
+/**
+ * A notification the client should surface (desktop notification, title badge).
+ *
+ * Sent only to users the server decided should be notified, so the client does
+ * not re-implement the preference and mention rules -- and so a muted channel
+ * costs the client nothing at all.
+ */
+export type NotifyPayload = {
+  messageId: string;
+  channelId: string;
+  workspaceId: string;
+  /** Channel name, or the sender's name for a DM. */
+  channelLabel: string;
+  isDirect: boolean;
+  /** True when this fired because the viewer was named. */
+  isMention: boolean;
+  author: UserSummary;
+  preview: string;
 };
 
 export type TypingPayload = {
@@ -82,6 +110,15 @@ export type ServerToClientEvents = {
   "presence:sync": (onlineUserIds: string[]) => void;
   "presence:update": (payload: { userId: string; online: boolean }) => void;
   "read:update": (payload: { channelId: string; lastReadAt: string }) => void;
+  /** Surface a desktop notification / title badge. */
+  notify: (payload: NotifyPayload) => void;
+  /** The viewer's unread mention count for a channel changed. */
+  "mentions:update": (payload: { channelId: string; unreadMentions: number }) => void;
+  /** An admin changed the viewer's role, or removed them from the workspace. */
+  "membership:update": (payload: {
+    workspaceId: string;
+    role: "OWNER" | "ADMIN" | "MEMBER" | null;
+  }) => void;
 };
 
 export type ClientToServerEvents = {

@@ -11,20 +11,46 @@ import { ThreadPanel } from "@/components/thread-panel";
 import { useWorkspace } from "@/components/workspace-provider";
 import { useChannelMessages, type LocalMessage, type PendingAttachment } from "@/hooks/use-channel-messages";
 import type { ChannelDTO } from "@/lib/events";
+import { ChannelMembersDialog } from "@/components/channel-members-dialog";
+import { useChannelMembers } from "@/hooks/use-channel-members";
 import { channelLabel } from "@/lib/channel-label";
 import { api } from "@/lib/fetcher";
 
 const READ_DEBOUNCE_MS = 700;
 
+const NOTIFY_OPTIONS = [
+  { level: "ALL" as const, label: "Every message" },
+  { level: "MENTIONS" as const, label: "Mentions only" },
+  { level: "NONE" as const, label: "Nothing" },
+];
+
 export function ChannelView({ channel }: { channel: ChannelDTO }) {
   const router = useRouter();
-  const { viewer, workspace, presence, markRead, noteIncoming, typingIn, connected, refreshChannels } =
-    useWorkspace();
+  const {
+    viewer,
+    workspace,
+    presence,
+    markRead,
+    markMentionsRead,
+    noteIncoming,
+    typingIn,
+    connected,
+    refreshChannels,
+    setNotificationLevel,
+    canAdminister,
+  } = useWorkspace();
   const { messages, loading, loadingMore, hasOlder, error, loadOlder, send, discard } =
     useChannelMessages(channel.id, workspace.id, viewer);
+  const {
+    members,
+    knownUsernames,
+    truncated: truncatedMembers,
+    reload: reloadMembers,
+  } = useChannelMembers(channel.id);
 
   const [threadRootId, setThreadRootId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(false);
 
   const label = channelLabel(channel);
   const isNamed = channel.type === "PUBLIC" || channel.type === "PRIVATE";
@@ -35,6 +61,20 @@ export function ChannelView({ channel }: { channel: ChannelDTO }) {
   useEffect(() => {
     setThreadRootId(null);
     setMenuOpen(false);
+    setMembersOpen(false);
+  }, [channel.id]);
+
+  /**
+   * Opening a channel clears its mention badge.
+   *
+   * Mentions are a to-do list, not a counter, so they are cleared by being
+   * looked at rather than by scrolling to the bottom like ordinary unreads --
+   * the thing that named you is somewhere in the transcript, and you came here
+   * to read it.
+   */
+  useEffect(() => {
+    if (channel.unreadMentions > 0) markMentionsRead(channel.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel.id]);
 
   const leaveChannel = useCallback(async () => {
@@ -177,9 +217,44 @@ export function ChannelView({ channel }: { channel: ChannelDTO }) {
 
                 {menuOpen && (
                   <div
-                    className="absolute right-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] py-1 shadow-xl"
+                    className="absolute right-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-md border border-[var(--color-line)] bg-[var(--color-surface)] py-1 shadow-xl"
                     onMouseLeave={() => setMenuOpen(false)}
                   >
+                    <button
+                      type="button"
+                      className="block w-full px-3 py-1.5 text-left text-sm hover:bg-[var(--color-surface-2)]"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setMembersOpen(true);
+                      }}
+                    >
+                      Members{truncatedMembers ? "" : ` (${members.length})`}
+                    </button>
+
+                    <div className="my-1 h-px bg-[var(--color-line)]" />
+
+                    <p className="px-3 pt-1 pb-0.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--color-ink-muted)]">
+                      Notify me about
+                    </p>
+                    {NOTIFY_OPTIONS.map((option) => (
+                      <button
+                        key={option.level}
+                        type="button"
+                        className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-sm hover:bg-[var(--color-surface-2)] ${
+                          channel.notify === option.level ? "font-semibold" : ""
+                        }`}
+                        onClick={() => {
+                          setMenuOpen(false);
+                          void setNotificationLevel(channel.id, option.level).catch(() => {});
+                        }}
+                      >
+                        {option.label}
+                        {channel.notify === option.level && <span aria-hidden>✓</span>}
+                      </button>
+                    ))}
+
+                    <div className="my-1 h-px bg-[var(--color-line)]" />
+
                     <button
                       type="button"
                       className="block w-full px-3 py-1.5 text-left text-sm text-[var(--color-danger)] hover:bg-[var(--color-surface-2)]"
@@ -204,6 +279,8 @@ export function ChannelView({ channel }: { channel: ChannelDTO }) {
           <MessageList
             messages={messages}
             viewerId={viewer.id}
+            viewerUsername={viewer.username}
+            knownUsernames={knownUsernames}
             presence={presence}
             hasOlder={hasOlder}
             loadingMore={loadingMore}
@@ -240,6 +317,7 @@ export function ChannelView({ channel }: { channel: ChannelDTO }) {
             channelId={channel.id}
             workspaceId={workspace.id}
             autoFocus
+            mentionPeople={members}
             placeholder={isNamed ? `Message #${label}` : `Message ${label}`}
             onSend={onSend}
           />
@@ -251,9 +329,20 @@ export function ChannelView({ channel }: { channel: ChannelDTO }) {
           <ThreadPanel
             rootId={threadRootId}
             channelId={channel.id}
+            mentionPeople={members}
+            knownUsernames={knownUsernames}
             onClose={() => setThreadRootId(null)}
           />
         </div>
+      )}
+
+      {membersOpen && (
+        <ChannelMembersDialog
+          channel={channel}
+          canManage={canAdminister}
+          onChanged={reloadMembers}
+          onClose={() => setMembersOpen(false)}
+        />
       )}
     </div>
   );

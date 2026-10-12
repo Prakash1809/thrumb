@@ -1,8 +1,20 @@
 import { Prisma } from "@prisma/client";
 
-import type { AttachmentDTO, ChannelDTO, MessageDTO, ReactionGroup, UserSummary } from "@/lib/events";
+import type {
+  AttachmentDTO,
+  ChannelDTO,
+  MessageDTO,
+  NotificationLevel,
+  ReactionGroup,
+  UserSummary,
+} from "@/lib/events";
 
-export const userSelect = { id: true, name: true, image: true } satisfies Prisma.UserSelect;
+export const userSelect = {
+  id: true,
+  name: true,
+  username: true,
+  image: true,
+} satisfies Prisma.UserSelect;
 
 export const messageInclude = {
   user: { select: userSelect },
@@ -82,10 +94,16 @@ export type ChannelRow = {
   members: { userId: string; lastReadAt: Date; user: UserSummary }[];
 };
 
+export type ChannelBadges = {
+  unreadCount?: number;
+  unreadMentions?: number;
+  notify?: NotificationLevel;
+};
+
 export function toChannelDTO(
   row: ChannelRow,
   viewerId: string,
-  unreadCount = 0,
+  badges: ChannelBadges = {},
 ): ChannelDTO {
   const membership = row.members.find((m) => m.userId === viewerId);
   return {
@@ -99,7 +117,9 @@ export function toChannelDTO(
       row.type === "DM" || row.type === "GROUP"
         ? row.members.filter((m) => m.userId !== viewerId).map((m) => m.user)
         : [],
-    unreadCount,
+    unreadCount: badges.unreadCount ?? 0,
+    unreadMentions: badges.unreadMentions ?? 0,
+    notify: badges.notify ?? "MENTIONS",
     isMember: Boolean(membership),
   };
 }

@@ -20,7 +20,7 @@ export const GET = route(async (_req: Request, { params }: Params) => {
 
 export const POST = route(async (req: Request, { params }: Params) => {
   const user = await requireUser();
-  enforce("createResource", user.id);
+  await enforce("createResource", user.id);
 
   const { workspaceId } = await params;
   await requireWorkspaceMember(user.id, workspaceId);

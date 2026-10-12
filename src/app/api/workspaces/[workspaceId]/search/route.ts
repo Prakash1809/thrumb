@@ -14,7 +14,7 @@ export const GET = route(async (req: Request, { params }: Params) => {
   const user = await requireUser();
   // The most expensive read we expose: two GIN index scans plus a second
   // fetch. Bounded per user so one client cannot pin a CPU.
-  enforce("search", user.id);
+  await enforce("search", user.id);
 
   const { workspaceId } = await params;
   await requireWorkspaceMember(user.id, workspaceId);

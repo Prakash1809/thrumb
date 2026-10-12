@@ -30,9 +30,9 @@ if (process.env.NODE_ENV === "production" && process.env.ALLOW_PRODUCTION_SEED !
 const DEMO_PASSWORD = "thrum-demo-9471";
 
 const PEOPLE = [
-  { email: "ada@thrum.dev", name: "Ada Lovelace" },
-  { email: "grace@thrum.dev", name: "Grace Hopper" },
-  { email: "alan@thrum.dev", name: "Alan Turing" },
+  { email: "ada@thrum.dev", name: "Ada Lovelace", username: "ada" },
+  { email: "grace@thrum.dev", name: "Grace Hopper", username: "grace" },
+  { email: "alan@thrum.dev", name: "Alan Turing", username: "alan" },
 ];
 
 async function main() {
@@ -44,8 +44,10 @@ async function main() {
         where: { email: person.email },
         create: { ...person, passwordHash },
         // Re-seeding resets the demo password, so a changed DEMO_PASSWORD takes
-        // effect without needing the database dropped.
-        update: { name: person.name, passwordHash },
+        // effect without needing the database dropped. The short usernames are
+        // reasserted too, so @ada works even on a database seeded before
+        // mentions existed (where the backfill produced "ada.lovelace").
+        update: { name: person.name, username: person.username, passwordHash },
       }),
     ),
   );

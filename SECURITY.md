@@ -47,8 +47,11 @@ Invite codes ([src/lib/invites.ts](src/lib/invites.ts)) are 160-bit CSPRNG value
 
 - Passwords: bcrypt, cost 12. Minimum 10 characters, checked against a small common-password list and a repetitiveness heuristic ([src/lib/password.ts](src/lib/password.ts)). This follows NIST SP 800-63B's "long minimum plus a compromised-secret check" rather than composition rules.
 - Sign-in failure is constant-time with respect to whether the account exists: a missing password hash is compared against a throwaway hash rather than returning early.
-- Sign-in is rate limited on **two** buckets — per client address and per target account — so neither one host spraying many accounts nor many hosts targeting one account gets unbounded attempts.
+- Sign-in is rate limited on **two** buckets of deliberately different sizes. Per *account* is tight (10 per 10 minutes) — that is the targeted attack, and one human needs few attempts. Per *address* is large (600 per 10 minutes) because an organisation usually shares one egress IP, and a limit sized for one person locks the whole office out every Monday morning. Getting that asymmetry wrong turns a brute-force defence into a self-inflicted denial of service.
+- **Password reset** ([forgot](src/app/api/auth/forgot/route.ts) / [reset](src/app/api/auth/reset/route.ts)): 256-bit CSPRNG token, stored only as a SHA-256 digest, single use, 30-minute expiry. The request endpoint returns an identical response whether or not the address exists, so it is not a membership oracle. The token is consumed inside the same `UPDATE ... WHERE usedAt IS NULL` that changes the password, so two submissions of one link cannot both succeed.
+- **Sessions can be revoked.** Sessions are stateless JWTs, so there is no server-side row to delete — instead each user carries `sessionsRevokedAt`, and [lib/session-revocation.ts](src/lib/session-revocation.ts) refuses any token issued before it. A password reset and a deactivation both stamp it. Without this, resetting a compromised account's password would lock the attacker out of future sign-ins while leaving the session they already hold working until it expired. The check is cached for 30 seconds per user, so it does not add a database read to every request; the trade is that revocation can take that long to be felt.
 - Sessions are JWTs in an `httpOnly`, `SameSite=Lax` cookie, `Secure` in production.
+- **Deactivated accounts** cannot sign in (checked after the password comparison, so timing does not distinguish it from a wrong password), cannot come back in through OAuth, and cannot hold a live socket.
 
 ### OAuth account linking
 
@@ -60,6 +63,14 @@ Invite codes ([src/lib/invites.ts](src/lib/invites.ts)) are 160-bit CSPRNG value
 
 If you add a provider, you must decide this question for it explicitly.
 
+### Mentions and notifications
+
+An `@handle` resolves only to **members of the channel it was written in** ([lib/notify.ts](src/lib/notify.ts)). Naming someone who cannot read the channel would either notify them about content they have no access to, or leave a mention row pointing at a message they cannot open — so it silently does not resolve instead.
+
+The server decides who to notify, not the client. That keeps the preference and mention rules in one place, and means a muted channel costs the client nothing because the event never arrives. An explicit mute (`NONE`) beats someone else's decision to name you: a direct mention into a muted channel stays silent, because the mute is the stronger signal.
+
+`@channel` and `@here` deliberately create no mention rows. They are a notification, not a to-do — persisting them would leave every member with an unread-mention badge they cannot meaningfully clear. `@here` is resolved against live presence server-side, so an offline member is not woken by a stale notification on their next connect.
+
 ### CSRF
 
 Mutating requests are checked in [src/middleware.ts](src/middleware.ts): `Sec-Fetch-Site` must be `same-origin` (or `none`, a direct user action), and failing that, `Origin` must match the host the request arrived at.
@@ -70,7 +81,7 @@ Requests with neither header are allowed — those are non-browser clients, whic
 
 ### XSS and content injection
 
-- Message bodies are **never** turned into HTML. [Linkify](src/components/linkify.tsx) emits React elements, so a message is text nodes plus anchors with a scheme we chose. There is no `dangerouslySetInnerHTML` anywhere in the codebase.
+- Message bodies are **never** turned into HTML. [MessageText](src/components/message-text.tsx) emits React elements, so a message is text nodes plus anchors with a scheme we chose. There is no `dangerouslySetInnerHTML` anywhere in the codebase.
 - CSP is set per response with a fresh nonce, using `strict-dynamic` in production ([src/middleware.ts](src/middleware.ts)). `style-src` allows inline styles — a deliberate, bounded concession, since inline CSS cannot execute script and Next injects `<style>` for route transitions.
 - Uploads: only raster images (`png`, `jpeg`, `gif`, `webp`, `avif`) are served inline. **Everything else, including SVG and PDF, is served as `application/octet-stream` with `Content-Disposition: attachment`**, plus `nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. An uploaded `.html` or `.svg` therefore cannot execute on this origin.
 - The browser's declared MIME type is stored for display only; serving decisions never trust it.
@@ -85,11 +96,14 @@ Prisma's query builder everywhere except three raw queries (unread counts, searc
 
 ### Denial of service
 
-- **Rate limits** on sign-in, registration, message sends, uploads, search, resource creation, invite minting and invite redemption ([src/lib/rate-limit.ts](src/lib/rate-limit.ts)).
-- The client address comes from the **TCP peer**, stamped into a header by `server.ts` after deleting any inbound copy — so a client cannot present a fresh identity per request. `X-Forwarded-For` is believed **only** when `TRUST_PROXY=1`.
+- **Rate limits** on sign-in, registration, password reset, message sends, uploads, search, resource creation, invite minting and invite redemption ([src/lib/rate-limit.ts](src/lib/rate-limit.ts)). Backed by Redis when `REDIS_URL` is set, so the limit is the limit regardless of how many app instances there are; in-memory otherwise, which is correct for one.
+- The client address comes from the **TCP peer**, stamped into a header by `server.ts` after deleting any inbound copy — so a client cannot present a fresh identity per request. `X-Forwarded-For` is believed **only** when `TRUST_PROXY=1`, because otherwise anyone could forge it and bypass every per-address limit.
+- **Unread counting is bounded by what the viewer has not read**, not by total message volume. The query drives off the viewer's channel memberships with a `LATERAL` subquery and a cap, so one index range scan per channel ([lib/unread.ts](src/lib/unread.ts)). The earlier version scanned the workspace's messages and joined membership onto them, which degrades with history rather than with the reader.
+- **Member and channel lists are paginated and searched server-side.** They used to be loaded whole into every client on page load — a thousand-row payload to populate a picker showing eight at a time.
+- **Presence is a shared, reference-counted set with a TTL**, so a crashed instance cannot leave people online forever, and a connect no longer reads every member row of every workspace the person belongs to.
 - Socket events carry a refilling per-socket budget, because `channel:subscribe` does a database read and an unbounded emit loop would otherwise be a database DoS.
 - Typing events read the display name **once at connect**, not per event.
-- **ReDoS:** the URL-matching regex in `Linkify` is deliberately a single greedy character class. The natural way to avoid linking a trailing full stop (`[^\s<>()]+[^\s<>().,;:!?'"]`) nests a subset class after a repeated one — catastrophic backtracking, and since it runs in every reader's browser on every message, a crafted message would freeze their tab. Trailing punctuation is trimmed in linear code instead.
+- **ReDoS:** the token-matching regex in `MessageText` is deliberately one alternation of single greedy character classes. The natural way to avoid linking a trailing full stop (`[^\s<>()]+[^\s<>().,;:!?'"]`) nests a subset class after a repeated one — catastrophic backtracking, and since it runs in every reader's browser on every message, a crafted message would freeze their tab. Trailing punctuation is trimmed in linear code instead.
 - `maxHttpBufferSize` caps socket payloads at 1MB; attachments go through HTTP.
 
 ### Headers
@@ -102,15 +116,31 @@ Prisma's query builder everywhere except three raw queries (unread counts, searc
 
 Nothing below is done for you.
 
-- [ ] **Generate a fresh `AUTH_SECRET`** (`npx auth secret`). Never reuse one from a tutorial, a screenshot, or this repo's history.
-- [ ] **Change the Postgres password.** `docker-compose.yml` ships `thrum`/`thrum` for local development and is bound to `127.0.0.1` so it is not reachable off-box. Do not use it as-is anywhere else.
-- [ ] **Terminate TLS** in front of the app, then set `ENABLE_HSTS=1`. Session cookies are only marked `Secure` over HTTPS.
-- [ ] **Set `AUTH_URL`** to the public origin, so callback URLs and the CSRF check do not depend on the `Host` header.
-- [ ] **Set `TRUST_PROXY=1` only if** a proxy you control is the only path to the app and it *overwrites* `X-Forwarded-For`. If the app is directly reachable, leave it off or rate limiting can be bypassed.
-- [ ] **Consider `ALLOW_REGISTRATION=0`** and inviting people instead. Open registration means anyone can create an account; it grants no workspace access, but it does consume rows.
-- [ ] **Do not run the seed script.** It creates accounts whose password is published in the README. It refuses to run with `NODE_ENV=production` unless `ALLOW_PRODUCTION_SEED=1`.
+[DEPLOYMENT.md](DEPLOYMENT.md) has the commands. This is the list of decisions that are yours.
+
+**Secrets**
+- [ ] **Generate a fresh `AUTH_SECRET`** (`openssl rand -base64 32`). Never reuse one from a tutorial, a screenshot, or this repo's history. Anyone who holds it can mint a session for any account. The container entrypoint refuses to start without it.
+- [ ] **Change the Postgres password.** `docker-compose.yml` ships `thrum`/`thrum` for local development, bound to `127.0.0.1`. `docker-compose.prod.yml` requires `POSTGRES_PASSWORD` and exposes no host port at all.
+
+**Transport**
+- [ ] **Terminate TLS** in front of the app, then set `ENABLE_HSTS=1`. Session cookies are only marked `Secure` over HTTPS, so this is not optional on the internet.
+- [ ] **Set `AUTH_URL`** to the exact public origin, scheme included, so callback URLs and the CSRF check do not depend on the `Host` header.
+- [ ] **Set `TRUST_PROXY=1` only if** a proxy you control is the only path in *and* it overwrites `X-Forwarded-For`. If the app is directly reachable, leave it off — otherwise a client forges a fresh address per request and every per-address limit stops meaning anything.
+
+**Scale**
+- [ ] **Set `REDIS_URL` before running a second app instance.** Without it, rate-limit counters, presence and socket fan-out are per process. Nothing fails loudly: limits allow N times their quota, people show offline, and a message reaches only the instance that received it.
+- [ ] **Use sticky sessions** at the load balancer if you run more than one instance. Socket.IO's polling fallback makes several requests per handshake and they must land together.
+
+**Accounts**
+- [ ] **Configure SMTP** before onboarding a real team. Without it, password-reset links go to the server log — survivable for a handful of people, a support queue for a hundred.
+- [ ] **Consider `ALLOW_REGISTRATION=0`** and inviting people instead. Open registration grants no workspace access, but it does let anyone create an account.
+- [ ] **Know how to offboard** before you need to: workspace menu → People → Remove (this workspace) or Deactivate (owner only; signs them out everywhere and blocks sign-in). Messages are kept deliberately.
+- [ ] **Do not run the seed script.** It creates accounts whose password is published in this repository. It refuses to run with `NODE_ENV=production` unless `ALLOW_PRODUCTION_SEED=1`, and `SEED_DEMO_DATA` defaults to off.
+
+**Data**
 - [ ] **Keep `UPLOAD_DIR` outside `./public`.** Serving it statically would bypass the channel-membership check entirely.
-- [ ] **Back up Postgres and the upload directory together.** Attachment rows and files are separate stores; restoring one without the other leaves broken links.
+- [ ] **Back up Postgres and the upload directory together.** Attachment rows and files are separate stores; restoring one without the other leaves broken links. Redis needs no backup — everything in it is reconstructible.
+- [ ] **Take a database backup before upgrading.** Migrations are forward-only; there are no down migrations.
 - [ ] **Put the upload directory on a volume with a quota.** Rate limits bound the rate, not the total.
 
 ---
@@ -121,17 +151,21 @@ Stated plainly, because they bound what this app currently is:
 
 | Limitation | Consequence |
 | --- | --- |
-| Rate limits are **per process, in memory** | Behind N instances each allows the full quota, and a restart clears every window. Move `hit()` onto Redis before scaling out. |
-| Presence and typing are **per process** | Two instances each only know their own connections. Needs the Socket.IO Redis adapter. |
-| **No email verification** for password sign-up | An address can be registered without proving ownership. It grants no workspace access, but display names are not trustworthy identity. |
-| **No password reset** | There is no reset flow, so there is also no reset-token vector. A forgotten password needs a database change. |
-| **No 2FA / MFA** | A leaked password is full account access. |
+| Rate limits are **in-process without `REDIS_URL`** | Correct for one instance; with N instances and no Redis each allows the full quota. Set `REDIS_URL` before scaling out — see [DEPLOYMENT.md](DEPLOYMENT.md#sizing). |
+| **No email verification** for password sign-up | An address can be registered without proving ownership. It grants no workspace access, but display names are not trustworthy identity. Pair `ALLOW_REGISTRATION=0` with invite links if that matters. |
+| Password reset **depends on email being configured** | Without `SMTP_HOST` the link is written to the server log rather than sent. Workable for a handful of people; set SMTP before onboarding a team. |
+| Session revocation has a **30-second window** | The revocation check is cached per process to avoid a database read per request, so a reset or deactivation can take up to 30s to end an in-flight session. |
+| **No 2FA / MFA** | A leaked password is full account access until it is reset. |
 | Common-password list is **small and offline** | A Have I Been Pwned range query would be strictly better. |
 | **No audit log** | Administrative actions (invite minting, revocation, role grants) are not recorded beyond their row's `createdById`. |
 | **No per-workspace storage quota** | Uploads are rate limited but not capped in total. |
 | Deletes are **soft** | A deleted message's row persists with an empty body; it is withheld from the wire, not erased. Attachment rows and reactions *are* hard-deleted, but the file on disk is not yet reaped. |
-| Roles exist but are **barely used** | `OWNER`/`ADMIN`/`MEMBER` gate invite management only. There is no admin UI for removing members or changing roles. |
-| **No add-member flow for private channels** | A private channel currently contains only its creator. |
+| Roles gate **invites, member administration and channel removal** | There is no finer-grained permission model than owner / admin / member. |
+| **No test suite** | Every control above was verified by driving the live API, not by anything that would catch a regression. The highest-value thing to add. |
+| Presence is **per process without `REDIS_URL`** | Two instances each only know their own connections. With Redis it is a shared, reference-counted set with a TTL so a crashed instance cannot strand people online. |
+| **Mentions resolve only within the channel** | Naming someone who cannot read the channel silently does not resolve, rather than notifying them about content they cannot open. Intended, but it can surprise. |
+| The mention picker loads **at most 200 channel members** | Past that, an unlisted member's handle still resolves when the message is sent — it just is not suggested and renders unhighlighted. |
+| **No message retention or export** | Nothing expires, and there is no compliance export. |
 | `trustHost: true` | Required by the custom server. Set `AUTH_URL` so host-header manipulation cannot influence callback URLs. |
 
 ## Dependency and secret hygiene
