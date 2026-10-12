@@ -1,0 +1,151 @@
+@import "tailwindcss";
+
+/*
+  Two surfaces, like Slack: a dark rail that stays dark in both themes, and a
+  transcript surface that follows the colour scheme. Everything is a token so a
+  theme swap never means hunting hex codes through components.
+*/
+@theme {
+  --color-rail: oklch(0.21 0.035 300);
+  --color-rail-hover: oklch(0.28 0.045 300);
+  --color-rail-active: oklch(0.52 0.17 265);
+  --color-rail-text: oklch(0.82 0.015 300);
+  --color-rail-muted: oklch(0.66 0.02 300);
+
+  --color-surface: oklch(1 0 0);
+  --color-surface-2: oklch(0.975 0.002 280);
+  --color-surface-3: oklch(0.945 0.004 280);
+  --color-line: oklch(0.9 0.005 280);
+  --color-ink: oklch(0.22 0.01 280);
+  --color-ink-muted: oklch(0.52 0.012 280);
+  --color-accent: oklch(0.52 0.17 265);
+  --color-accent-ink: oklch(0.99 0 0);
+  --color-danger: oklch(0.56 0.19 25);
+  --color-online: oklch(0.72 0.17 150);
+
+  --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial,
+    sans-serif;
+}
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --color-surface: oklch(0.2 0.008 280);
+      --color-surface-2: oklch(0.24 0.009 280);
+      --color-surface-3: oklch(0.28 0.01 280);
+      --color-line: oklch(0.33 0.012 280);
+      --color-ink: oklch(0.93 0.004 280);
+      --color-ink-muted: oklch(0.68 0.01 280);
+      --color-accent: oklch(0.63 0.16 265);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --color-surface: oklch(0.2 0.008 280);
+    --color-surface-2: oklch(0.24 0.009 280);
+    --color-surface-3: oklch(0.28 0.01 280);
+    --color-line: oklch(0.33 0.012 280);
+    --color-ink: oklch(0.93 0.004 280);
+    --color-ink-muted: oklch(0.68 0.01 280);
+    --color-accent: oklch(0.63 0.16 265);
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    background: var(--color-surface);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* The app owns its own scroll containers; the page itself never scrolls. */
+  body:has(.app-shell) {
+    overflow: hidden;
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--color-accent) 30%, transparent);
+  }
+}
+
+@layer components {
+  /* Plain CSS rather than @apply: one rule, no dependency on which ring
+     utilities a given Tailwind version ships. */
+  .focus-ring {
+    outline: none;
+  }
+
+  .focus-ring:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  /* Thin scrollbars that do not shout, in both themes. */
+  .scroll-y {
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, currentColor 25%, transparent) transparent;
+    overscroll-behavior: contain;
+  }
+
+  .scroll-y::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .scroll-y::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, currentColor 22%, transparent);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+
+  .scroll-y::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklch, currentColor 38%, transparent);
+    background-clip: content-box;
+  }
+}
+
+/* Message body: preserve the author's line breaks without letting a long URL
+   blow out the column width. */
+.message-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.message-body a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@keyframes thrum-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.fade-in {
+  animation: thrum-fade-in 120ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-in {
+    animation: none;
+  }
+}

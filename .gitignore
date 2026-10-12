@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+
+# Build output
+.next/
+out/
+build/
+dist/
+next-env.d.ts
+tsconfig.tsbuildinfo
+
+# Secrets. .env holds AUTH_SECRET and the database URL -- never commit it.
+# .env.example is the committed, placeholder-only template.
+.env
+.env.local
+.env*.local
+.env.production
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Uploaded attachments. User content, not source.
+var/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+dev.log
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# Test and coverage output
+coverage/
+.nyc_output/
+playwright-report/
+test-results/

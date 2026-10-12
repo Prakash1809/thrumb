@@ -1,0 +1,29 @@
+# Pinned so the container and volume names do not depend on what the checkout
+# directory happens to be called.
+name: thrum
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: thrum-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: thrum
+      POSTGRES_PASSWORD: thrum
+      POSTGRES_DB: thrum
+    ports:
+      # Bound to the loopback interface deliberately. "5432:5432" listens on
+      # every interface, which puts a trust-nothing dev database with the
+      # password `thrum` on the local network -- and on some setups, through the
+      # router. Nothing outside this machine needs to reach it.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - thrum-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U thrum -d thrum"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  thrum-pgdata:

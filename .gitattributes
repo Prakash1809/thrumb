@@ -1,0 +1,22 @@
+# Normalise line endings so a Windows checkout does not produce a diff of the
+# entire repository on a Linux CI runner.
+* text=auto eol=lf
+
+# Keep shell scripts LF regardless of platform -- CRLF breaks the shebang.
+*.sh text eol=lf
+
+# Lockfiles are generated. Collapse them in diffs and reviews.
+package-lock.json linguist-generated=true -diff
+
+# Migrations are generated but reviewing them matters, so no -diff here.
+prisma/migrations/** linguist-generated=false
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary

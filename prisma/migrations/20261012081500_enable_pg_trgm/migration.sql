@@ -1,0 +1,11 @@
+-- Enables trigram matching, which backs the GIN index on Message.body declared
+-- in schema.prisma (`@@index([body(ops: raw("gin_trgm_ops"))], type: Gin)`).
+--
+-- This has to be its own migration, ordered before the one that creates that
+-- index: the gin_trgm_ops operator class does not exist until the extension is
+-- installed, so a single combined migration would fail on a fresh database.
+--
+-- Requires a role allowed to create extensions. The Docker Compose Postgres
+-- superuser can; a managed provider may need this enabled from its console
+-- instead -- see SECURITY.md for the deployment notes.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;

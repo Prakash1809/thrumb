@@ -1,0 +1,260 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Auth.js models. Account/Session/VerificationToken are the shapes the Prisma
+// adapter expects; passwordHash is our own addition for credentials sign-in.
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  createdAt     DateTime  @default(now())
+
+  accounts           Account[]
+  sessions           Session[]
+  memberships        WorkspaceMember[]
+  channelMemberships ChannelMember[]
+  messages           Message[]
+  reactions          Reaction[]
+  createdChannels    Channel[]         @relation("ChannelCreator")
+  createdInvites     WorkspaceInvite[] @relation("InviteCreator")
+}
+
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces
+// ---------------------------------------------------------------------------
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Workspace {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+
+  members  WorkspaceMember[]
+  channels Channel[]
+  messages Message[]
+  invites  WorkspaceInvite[]
+}
+
+/// Joining a workspace requires one of these. Without it, any authenticated
+/// account on the instance could enrol itself into any workspace and read every
+/// public channel in it.
+///
+/// The code itself is never stored -- only its SHA-256 digest -- so a database
+/// disclosure does not hand the reader a set of working invite links. The code
+/// is returned to its creator exactly once, at creation.
+model WorkspaceInvite {
+  id          String    @id @default(cuid())
+  workspaceId String
+  /// SHA-256 of the invite code, hex encoded. Lookups hash the presented code.
+  codeHash    String    @unique
+  /// First characters of the code, so an admin can tell their invites apart in
+  /// a list without the full code being recoverable from the database.
+  codeHint    String
+  role        Role      @default(MEMBER)
+  createdById String?
+  /// 0 means unlimited uses.
+  maxUses     Int       @default(0)
+  uses        Int       @default(0)
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User?     @relation("InviteCreator", fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt(sort: Desc)])
+}
+
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        Role     @default(MEMBER)
+  joinedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Channels. PUBLIC/PRIVATE are named rooms; DM/GROUP are member-derived and
+// carry no name. Keeping all four in one table means messages, threads,
+// reactions, read state and search have exactly one code path.
+// ---------------------------------------------------------------------------
+
+enum ChannelType {
+  PUBLIC
+  PRIVATE
+  DM
+  GROUP
+}
+
+model Channel {
+  id            String      @id @default(cuid())
+  workspaceId   String
+  type          ChannelType @default(PUBLIC)
+  name          String?
+  topic         String?
+  // Sorted, workspace-scoped member-id fingerprint. Lets us upsert a DM
+  // without racing two conversations into existence for the same pair.
+  dmKey         String?     @unique
+  createdById   String?
+  createdAt     DateTime    @default(now())
+  lastMessageAt DateTime    @default(now())
+
+  workspace Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  createdBy User?           @relation("ChannelCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  members   ChannelMember[]
+  messages  Message[]
+
+  // Postgres treats NULLs as distinct, so unnamed DM/GROUP rows don't collide.
+  @@unique([workspaceId, name])
+  @@index([workspaceId, type])
+  @@index([workspaceId, lastMessageAt(sort: Desc)])
+}
+
+model ChannelMember {
+  id         String   @id @default(cuid())
+  channelId  String
+  userId     String
+  lastReadAt DateTime @default(now())
+  joinedAt   DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Messages. A thread reply is a message with parentId set; the parent carries
+// a denormalised replyCount/lastReplyAt so channel lists need no subquery.
+// ---------------------------------------------------------------------------
+
+model Message {
+  id          String    @id @default(cuid())
+  workspaceId String
+  channelId   String
+  userId      String
+  body        String
+  parentId    String?
+  replyCount  Int       @default(0)
+  lastReplyAt DateTime?
+  createdAt   DateTime  @default(now())
+  editedAt    DateTime?
+  deletedAt   DateTime?
+
+  /// Stemmed search vector for `body`, maintained by a trigger created in the
+  /// 20261012_message_search migration.
+  ///
+  /// It is declared here -- rather than added out of band -- so that Prisma owns
+  /// the column and its GIN index. An index created outside the schema reads as
+  /// schema drift, and `prisma migrate dev` then refuses to run at all until the
+  /// database is reset, which is a trap for anyone cloning this repo.
+  searchVector Unsupported("tsvector")?
+
+  workspace   Workspace    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent      Message?     @relation("Thread", fields: [parentId], references: [id], onDelete: Cascade)
+  replies     Message[]    @relation("Thread")
+  attachments Attachment[]
+  reactions   Reaction[]
+
+  // Keyset pagination for the channel transcript reads straight off this.
+  @@index([channelId, parentId, createdAt(sort: Desc)])
+  @@index([parentId, createdAt])
+  @@index([workspaceId, createdAt(sort: Desc)])
+  // Stemmed phrase search ("deployed" finds "Deploy").
+  @@index([searchVector], type: Gin)
+  // Substring and prefix search, for terms a stemmer will not match
+  // ("laten" finds "Latency"). Needs the pg_trgm extension, enabled in the
+  // 20261012_enable_pg_trgm migration that runs before this index is created.
+  @@index([body(ops: raw("gin_trgm_ops"))], type: Gin)
+}
+
+model Attachment {
+  id        String   @id @default(cuid())
+  messageId String
+  key       String
+  name      String
+  mimeType  String
+  size      Int
+  width     Int?
+  height    Int?
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+model Reaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
