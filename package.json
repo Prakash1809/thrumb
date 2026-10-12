@@ -2,6 +2,20 @@
   "name": "thrum",
   "version": "0.1.0",
   "private": true,
+  "description": "Self-hosted, Slack-style team chat: realtime channels, DMs, threads and full-text search. Next.js 15, Postgres and Socket.IO in one Node process.",
+  "license": "MIT",
+  "keywords": [
+    "chat",
+    "team-chat",
+    "self-hosted",
+    "realtime",
+    "websockets",
+    "socket-io",
+    "nextjs",
+    "postgresql",
+    "prisma",
+    "typescript"
+  ],
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx server.ts",
     "build": "next build",
